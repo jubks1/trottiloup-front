@@ -27,7 +27,7 @@
 
 - Limited palette (e.g., deep blue, orange accent, neutral grays). Accessible contrast (AA/AAA for main text).
 - Reusable atomic components (buttons, cards, alerts, forms) via Tailwind CSS.
-- Responsive layout (mobile-first). Registration form optimized for mobile entry.
+- Fully responsive layout (MUST support mobile, tablet, desktop equally). Mobile-first approach: all pages, components, and interactions must render cleanly and remain fully usable on small screens (≥320px) as often accessed via phones. Registration form specifically optimized for mobile entry (reduced scrolling, large touch targets).
 - Immersive hero background image (Unsplash) with subtle dark gradient overlay for readability.
 
 ### 1.5 Security & Compliance
@@ -173,9 +173,51 @@ Server steps:
 2. Fetch Race + verify team-level and aggregate constraints.
 3. Create or upsert Unit + Leader (ensure uniqueness). If existing with conflicting leader, handle as conflict.
 4. Compute `totalParticipants` from team sum.
-5. Compute `totalPrice` via pricing mode (per participant or per team; configurable).
+5. Compute `totalPrice = participationPrice * totalParticipants` (fixed pricing model).
 6. Transaction: create Registration + Teams.
 7. Return success `{ id, paymentStatus }`.
+
+Confirmation payload (extended response consumed by confirmation page):
+
+- On success, return a detailed summary so the frontend can render the confirmation without any additional fetch:
+
+```jsonc
+{
+  "id": 123,
+  "paymentStatus": "PENDING",
+  "createdAt": "2025-11-26T10:00:00.000Z",
+  "race": {
+    "id": 1,
+    "name": "Catégorie Louveteaux",
+    "raceDate": "2026-04-20",
+    "participationPrice": 10.0,
+    "minParticipants": 3,
+    "maxParticipants": 12
+  },
+  "unit": { "unitName": "Scouts de la Forêt", "region": "Lux" },
+  "leader": {
+    "firstName": "Jean",
+    "lastName": "Dupont",
+    "email": "jean@example.com",
+    "phone": "+32470000000"
+  },
+  "teams": [
+    {
+      "teamName": "Louveteaux Rapides",
+      "participantCount": 5
+    },
+    { "teamName": "Les Verts", "participantCount": 4 }
+  ],
+  "pricing": {
+    "participationPrice": 10.0,
+    "totalParticipants": 9,
+    "numberOfTeams": 2,
+    "totalPrice": 90.0
+  }
+}
+```
+
+Note: the confirmation page uses this response directly and does not perform a second fetch. If the page is reloaded without state, redirect back to `/inscription`.
 
 ### 2.7 Admin Authentication & Endpoints
 
@@ -226,23 +268,18 @@ Notes:
 - All admin routes return `401 UNAUTHORIZED` if no session, `403 FORBIDDEN` if session invalid/expired.
 - Add indexes or query filters where needed to keep list endpoints responsive.
 
-### 2.7 Error Handling & Codes
+### 2.8 Error Handling & Codes
 
 - 400: Invalid payload / violated business rule.
 - 409: Conflict (existing leader mismatch, closed race, duplicate scenario).
 - 422: Valid format but logical constraint (min/max) failed.
 - 429: Too many requests (abuse prevention).
 - 500: Internal error (logged, user-friendly generic message).
-  Error JSON format:
+
+Error JSON format:
 
 ```json
 {
-
-Admin-specific:
-
-- `UNAUTHORIZED` → "Authentification requise."
-- `FORBIDDEN` → "Accès refusé. Session invalide ou expirée."
-- `RATE_LIMIT_LOGIN` → "Trop de tentatives de connexion. Réessayez plus tard."
   "error": {
     "code": "PARTICIPANT_CONSTRAINT",
     "message": "Le nombre de participants dépasse la limite de la course."
@@ -250,29 +287,22 @@ Admin-specific:
 }
 ```
 
+Admin-specific error codes:
+
+- `UNAUTHORIZED` → "Authentification requise."
+- `FORBIDDEN` → "Accès refusé. Session invalide ou expirée."
+- `RATE_LIMIT_LOGIN` → "Trop de tentatives de connexion. Réessayez plus tard."
+
 Messages remain in French for UI consumption.
 
-### 2.8 Validation & Anti-Abuse Heuristics
+### 2.9 Validation & Anti-Abuse Heuristics
 
 - Ensure `teams.length <= MAX_TEAMS_PER_REQUEST`.
 - Ensure `totalParticipants <= race.maxParticipants`.
 - Flag anomalous ratios (e.g., team count high with extremely large participantCount) for logging.
-- Apply IP rate limiting + potential future browser fingerprinting.
+- Apply IP rate limiting.
 
-### 2.9 Future Extensibility
-
-- Participant entity (individual names & ages) for richer analytics.
-- Payment integration (Stripe) → update payment lifecycle.
-- Admin dashboard: `/api/admin/*` secured via JWT/OAuth provider.
-- CSV export endpoints.
-
-### 2.10 Testing Strategy
-
-- Unit tests: Zod schemas & pricing calculation.
-- Integration tests: Prisma with ephemeral SQLite (CI) to test transactions.
-- Load tests: k6 or similar on `/api/registration` endpoint later.
-
-### 2.11 Observability & Logging
+### 2.10 Observability & Logging
 
 Structured JSON logs: `{ level: "info", event: "registration.created", registrationId: 123 }`.
 Errors: level `error` + stack trace.
@@ -280,9 +310,14 @@ Admin:
 
 - Log `admin.login.success`/`admin.login.failure` with IP and minimal metadata (no raw password), `admin.export` events (entity, filter size), `admin.registration.markPaid` with registration id.
 
-### 2.12 Migrations
+### 2.11 Migrations
 
-Managed via Prisma. Naming convention: `YYYYMMDDHHMM_add_race_table` etc.
+Managed via Prisma CLI commands:
+
+- `npx prisma migrate dev --name add_race_table` (development)
+- `npx prisma migrate deploy` (production)
+
+Naming convention: `YYYYMMDDHHMM_add_race_table` etc. (automatically generated by Prisma).
 
 ---
 
@@ -319,6 +354,33 @@ Multi-section form:
 5. Live summary: total participants + computed price.
 6. Submit button (loading state, disabled on errors). Success toast/page in French.
 
+#### Registration Confirmation (`/inscription/confirmation`)
+
+- Purpose: display a detailed, French-only recap immediately after a successful registration.
+  Access: redirected from successful POST `/api/registration` and consumes the full response payload directly (no second fetch). If accessed without payload (e.g., page refresh), show a soft error and link back to `/inscription`.
+- Content blocks (all labels in French):
+  - Race: `Nom de la course` (Race name), `Date de la course` (Race date), `Limites` (min/max participants limits) via `BadgeLimite`.
+  - Teams: readable table with columns `Nom de l'équipe` (Team name), `Participants`.
+  - Price summary:
+    - `Prix par participant` (Price per participant) displayed.
+    - `Participants totaux` (Total participants) and `Nombre d'équipes` (Number of teams).
+    - `Total` (computed as `participationPrice * totalParticipants`) displayed prominently, with thousands separator and `EUR`.
+  - Payment instructions:
+    - Display a prominent info box with payment details (all labels in French):
+      - Message: "Veuillez effectuer le paiement de {{totalPrice}} EUR sur le compte bancaire suivant avant le {{paymentDeadline}}:" (Please make the payment of {{totalPrice}} EUR to the following bank account before {{paymentDeadline}}:)
+      - Bank account number (IBAN) from configuration.
+      - Account holder name from configuration.
+      - Payment reference: Registration ID or unit name for identification.
+    - Styling: light blue background, border, prominent typography for amount and deadline.
+  - Actions:
+    - Link `Retour à l'accueil` (Back to home).
+- UI states:
+  - Consumes data returned by the registration creation endpoint (present in the response).
+  - Displays `AlertErreur` if payload is missing, with French message and option to return to the form.
+  - Loads data via `/api/registrations/{id}` (admin-protected for extras, but public confirmation only reads non-sensitive summary via a dedicated route, see Backend).
+  - Displays `AlertErreur` if retrieval fails, with French message and retry option.
+  - Responsive: stacked cards on mobile, teams table with horizontal scroll if necessary.
+
 #### Rules (`/reglement`)
 
 Suggested sections: Event purpose, Participation conditions, Safety & equipment, Race flow, Scout spirit, Responsibilities & insurance, Sanctions. Structured with `h2`, bullet lists, info boxes.
@@ -347,11 +409,11 @@ State no non-essential cookies initially. Future tracking requires consent banne
 - Admin Login page (not linked in public UI, accessible only via a specific URL): password field, submit, French validation, error messages and rate-limit messaging.
 - Admin Dashboard page (`/admin`):
   - Global header: "Administration — Le Trottiloup".
-  - Tabs or sectioned views with tables and filters:
-    - Équipes: filter by course, unité, date de création; columns: Nom de l'équipe, Nombre de participants, Unité, Date de création; export CSV.
-    - Responsables: columns: Unité, Prénom, Nom, Email, Téléphone, Date de création; export CSV.
-    - Unités: columns: Unité, Région; export CSV.
-    - Inscriptions: columns: Unité, Course, Participants totaux, Prix total, Statut de paiement, Date de création; actions: Bouton "Marquer comme payé"; export CSV.
+  - Tabs with tables and filters:
+    - Teams (Équipes): filter by race, unit, creation date; columns: Team name, Participant count, Unit, Creation date; export CSV.
+    - Leaders (Responsables): columns: Unit, First name, Last name, Email, Phone, Creation date; export CSV.
+    - Units (Unités): columns: Unit, Region; export CSV.
+    - Registrations (Inscriptions): columns: Unit, Race, Total participants, Total price, Payment status, Creation date; actions: "Mark as paid" button; export CSV.
   - All strings displayed strictly in French. Tables support pagination, sorting, and filtering.
   - If session missing/expired, redirect to `/admin/connexion`.
 
@@ -371,6 +433,9 @@ State no non-essential cookies initially. Future tracking requires consent banne
   - `ExportCsvButton`.
   - `FiltersBar` (race/unit/date filters).
   - `AdminLoginForm`.
+  - Confirmation components:
+    - `ConfirmationSummary.tsx` (header + key facts).
+    - `ReceiptDetails.tsx` (unit, leader, race, teams, pricing breakdown).
 
 ### 3.4 Error Handling (UI)
 
@@ -491,6 +556,7 @@ Les informations fournies sont utilisées uniquement pour l'organisation. Aucune
   /app
     /page.tsx (Landing)
     /inscription/page.tsx
+    /inscription/confirmation/page.tsx
     /reglement/page.tsx
     /contact/page.tsx
     /confidentialite/page.tsx
@@ -508,6 +574,8 @@ Les informations fournies sont utilisées uniquement pour l'organisation. Aucune
     ExportCsvButton.tsx
     FiltersBar.tsx
     AdminLoginForm.tsx
+    ConfirmationSummary.tsx
+    ReceiptDetails.tsx
   /lib
     api.ts (fetch abstractions)
     validation.ts (Zod schemas)
@@ -561,7 +629,6 @@ export const registrationSchema = z.object({
 
 ### 3.18 Pre-Launch Quality Checklist
 
-- Validation tests pass.
 - Lighthouse Mobile performance >85.
 - No console errors.
 - Full keyboard accessibility.
@@ -578,11 +645,11 @@ Unit(1) — Registration(N)
 Race(1) — Registration(N)
 Registration(1) — Team(N)
 
-### B. Pricing Modes (Configurable)
+### B. Pricing Model (Fixed)
 
-- Mode A: `totalPrice = participationPrice * totalParticipants`
-- Mode B: `totalPrice = participationPrice * numberOfTeams`
-  Stored in configuration (`pricingMode`).
+- **Fixed pricing formula**: `totalPrice = participationPrice * totalParticipants`
+- The `participationPrice` is defined per race and represents the cost per individual participant.
+- Example: If `participationPrice = 10 EUR` and `totalParticipants = 9`, then `totalPrice = 90 EUR`.
 
 ### C. Unit Duplicate Strategy
 
